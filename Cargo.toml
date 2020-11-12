@@ -14,6 +14,7 @@ members = [
     "linkerd/buffer",
     "linkerd/concurrency-limit",
     "linkerd/conditional",
+    "linkerd/connection-header",
     "linkerd/dns/name",
     "linkerd/dns",
     "linkerd/drain",
