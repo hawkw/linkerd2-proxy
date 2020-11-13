@@ -975,6 +975,9 @@ version = "0.1.0"
 dependencies = [
  "bytes 0.5.4",
  "futures 0.3.5",
+ "linkerd2-error",
+ "linkerd2-io",
+ "prost",
 ]
 
 [[package]]

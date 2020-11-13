@@ -25,6 +25,10 @@ impl<S: AsyncRead + AsyncWrite> PrefixedIo<S> {
     pub fn prefix(&self) -> &Bytes {
         &self.prefix
     }
+
+    pub fn prefix_mut(&mut self) -> &mut Bytes {
+        &mut self.prefix
+    }
 }
 
 impl<S: PeerAddr> PeerAddr for PrefixedIo<S> {
