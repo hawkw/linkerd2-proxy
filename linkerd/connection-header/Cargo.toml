@@ -8,7 +8,14 @@ publish = false
 [dependencies]
 futures = "0.3"
 bytes = "0.5"
+linkerd2-dns = { path = "../dns" }
 linkerd2-error = { path = "../error" }
 linkerd2-io = { path = "../io" }
 prost = "0.6"
-#tokio = { version = "0.2", features = ["io-util", "net", "macros"] }
+
+[build-dependencies]
+prost-build = { version = "0.6", default-features = false }
+
+[dev-dependencies]
+tokio = { version = "0.2", features = ["macros"] }
+tokio-test = "0.2"

@@ -1,29 +1,39 @@
 use bytes::{
     buf::{Buf, BufExt},
-    BytesMut,
+    Bytes, BytesMut,
 };
+use linkerd2_dns::Name;
 use linkerd2_error::Error;
-use linkerd2_io::{self as io, AsyncReadExt as _};
-use std::pin::Pin;
+use linkerd2_io::{self as io, AsyncReadExt, AsyncWriteExt};
+use prost::Message;
+use std::{convert::TryFrom, pin::Pin};
+
+mod proto {
+    include!(concat!(env!("OUT_DIR"), "/header.proxy.l5d.io.rs"));
+}
 
 #[derive(Clone, Debug)]
-pub struct Header {}
+pub struct ConnectionHeader {
+    pub name: Option<Name>,
+    port: u16,
+}
 
-impl Header {
+impl ConnectionHeader {
     const PREFIX: &'static [u8] = b"l5d.io/proxy\r\n\r\n";
+    #[cfg(test)]
+    const PREFIX_LEN: usize = Self::PREFIX.len() + 4;
 
-    pub async fn detect<I: io::AsyncRead + io::AsyncWrite + Unpin>(
-        io: &mut io::PrefixedIo<I>,
-    ) -> Result<Option<Header>, Error> {
+    pub async fn detect<I: io::AsyncRead + Unpin>(
+        mut io: &mut io::PrefixedIo<I>,
+    ) -> Result<Option<Self>, Error> {
         if io.prefix().len() < Self::PREFIX.len()
             || &io.prefix().as_ref()[..Self::PREFIX.len()] != Self::PREFIX
         {
             return Ok(None);
         }
-        let _ = io.prefix_mut().advance(Self::PREFIX.len());
+        io.prefix_mut().advance(Self::PREFIX.len());
 
         let sz = prost::decode_length_delimiter(io.prefix_mut())?;
-        io.prefix_mut().advance(prost::length_delimiter_len(sz));
         if sz == 0 {
             return Ok(None);
         }
@@ -33,16 +43,85 @@ impl Header {
             io.prefix_mut().split_to(len)
         };
         let needed = sz - buf.len();
-        let header = if needed == 0 {
-            let _ = buf;
-            Header {}
+        let h = if needed == 0 {
+            proto::Header::decode(buf)?
         } else {
             let mut rest = BytesMut::with_capacity(needed);
-            Pin::new(io).read_exact(rest.as_mut()).await?;
-            let buf = buf.chain(rest.freeze());
-            let _ = buf;
-            Header {}
+            loop {
+                if Pin::new(&mut io).read_buf(&mut rest).await? == 0 {
+                    break;
+                }
+            }
+            let rest = rest.freeze();
+            let buf = buf.chain(rest);
+            proto::Header::decode(buf)?
         };
-        Ok(Some(header))
+
+        let name = if h.name.len() == 0 {
+            None
+        } else {
+            Some(Name::try_from(h.name.as_bytes())?)
+        };
+
+        Ok(Some(Self {
+            name,
+            port: h.port as u16,
+        }))
+    }
+
+    pub async fn encode<I: io::AsyncWrite + Unpin>(&self, io: &mut I) -> Result<(), Error> {
+        let header = proto::Header {
+            port: self.port as i32,
+            name: self
+                .name
+                .as_ref()
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+        };
+
+        let mut buf = {
+            let mut buf = BytesMut::new();
+            header.encode_length_delimited(&mut buf)?;
+            Bytes::from_static(Self::PREFIX).chain(buf.freeze())
+        };
+
+        while buf.remaining() != 0 {
+            io.write_buf(&mut buf).await?;
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use linkerd2_io::Peekable;
+
+    #[tokio::test]
+    async fn roundtrip() {
+        let mut buf = Vec::<u8>::with_capacity(1024);
+
+        let a = ConnectionHeader {
+            port: 4040,
+            name: Some(Name::try_from("foo.bar.example.com".as_bytes()).unwrap()),
+        };
+
+        a.encode(&mut std::io::Cursor::new(&mut buf))
+            .await
+            .expect("encodes");
+
+        let b = {
+            let mut rx = std::io::Cursor::new(&mut buf)
+                .peek(ConnectionHeader::PREFIX_LEN)
+                .await
+                .expect("decodes");
+            ConnectionHeader::detect(&mut rx)
+                .await
+                .expect("decodes")
+                .expect("decodes")
+        };
+        assert_eq!(a.port, b.port);
+        assert_eq!(a.name, b.name);
     }
 }

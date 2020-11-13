@@ -19,7 +19,7 @@ struct Inner<T> {
     io: T,
 }
 
-pub trait Peekable: AsyncRead + AsyncWrite + Unpin {
+pub trait Peekable: AsyncRead + Unpin {
     fn peek(self, capacity: usize) -> Peek<Self>
     where
         Self: Sized,
@@ -32,7 +32,7 @@ impl<I: AsyncRead + AsyncWrite + Unpin> Peekable for I {}
 
 // === impl Peek ===
 
-impl<T: AsyncRead + AsyncWrite> Peek<T> {
+impl<T> Peek<T> {
     pub fn with_capacity(capacity: usize, io: T) -> Self
     where
         Self: Sized + Future,
@@ -42,7 +42,7 @@ impl<T: AsyncRead + AsyncWrite> Peek<T> {
     }
 }
 
-impl<T: AsyncRead + AsyncWrite + Unpin> Future for Peek<T> {
+impl<T: AsyncRead + Unpin> Future for Peek<T> {
     type Output = Result<PrefixedIo<T>, io::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {

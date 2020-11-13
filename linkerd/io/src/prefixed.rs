@@ -9,15 +9,15 @@ use pin_project::pin_project;
 /// A TcpStream where the initial reads will be served from `prefix`.
 #[pin_project]
 #[derive(Debug)]
-pub struct PrefixedIo<S> {
+pub struct PrefixedIo<T> {
     prefix: Bytes,
 
     #[pin]
-    io: S,
+    io: T,
 }
 
-impl<S: AsyncRead + AsyncWrite> PrefixedIo<S> {
-    pub fn new(prefix: impl Into<Bytes>, io: S) -> Self {
+impl<T> PrefixedIo<T> {
+    pub fn new(prefix: impl Into<Bytes>, io: T) -> Self {
         let prefix = prefix.into();
         Self { prefix, io }
     }
