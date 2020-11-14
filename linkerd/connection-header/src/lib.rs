@@ -19,21 +19,26 @@ pub struct ConnectionHeader {
 }
 
 impl ConnectionHeader {
-    const PREFIX: &'static [u8] = b"l5d.io/proxy\r\n\r\n";
-    #[cfg(test)]
+    const PREFIX: &'static [u8] = b"proxy.l5d.io/connect\r\n\r\n";
     const PREFIX_LEN: usize = Self::PREFIX.len() + 4;
 
     pub async fn detect<I: io::AsyncRead + Unpin>(
-        mut io: &mut io::PrefixedIo<I>,
+        mut io: &mut I,
     ) -> Result<Option<Self>, Error> {
-        if io.prefix().len() < Self::PREFIX.len()
-            || &io.prefix().as_ref()[..Self::PREFIX.len()] != Self::PREFIX
+        let buf = {
+            let mut buf = BytesMut::with_capacity(Self::PREFIX_LEN);
+            while io.read_buf(&mut buf).await? != 0 {}
+            buf.freeze()
+        };
+        if buf.len() < Self::PREFIX.len()
+            || &buf.as_ref()[0..Self::PREFIX.len()] != Self::PREFIX
         {
             return Ok(None);
         }
-        io.prefix_mut().advance(Self::PREFIX.len());
 
-        let sz = prost::decode_length_delimiter(io.prefix_mut())?;
+
+
+        let sz = buf.get_u32();
         if sz == 0 {
             return Ok(None);
         }
@@ -47,11 +52,7 @@ impl ConnectionHeader {
             proto::Header::decode(buf)?
         } else {
             let mut rest = BytesMut::with_capacity(needed);
-            loop {
-                if Pin::new(&mut io).read_buf(&mut rest).await? == 0 {
-                    break;
-                }
-            }
+            while Pin::new(&mut io).read_buf(&mut rest).await? != 0 {}
             let rest = rest.freeze();
             let buf = buf.chain(rest);
             proto::Header::decode(buf)?
