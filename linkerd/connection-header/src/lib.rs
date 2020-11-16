@@ -5,6 +5,7 @@ use bytes::{
 use linkerd2_dns::Name;
 use linkerd2_error::Error;
 use linkerd2_io::{self as io, AsyncReadExt, AsyncWriteExt};
+use linkerd2_proxy_transport::Detect;
 use prost::Message;
 use std::{convert::TryFrom, pin::Pin};
 
@@ -18,35 +19,35 @@ pub struct ConnectionHeader {
     port: u16,
 }
 
-impl ConnectionHeader {
-    const PREFIX: &'static [u8] = b"proxy.l5d.io/connect\r\n\r\n";
-    const PREFIX_LEN: usize = Self::PREFIX.len() + 4;
+#[derive(Clone, Debug)]
+pub struct DetectConnectionHeader {
+    capacity: usize,
+}
 
-    pub async fn detect<I: io::AsyncRead + Unpin>(
-        mut io: &mut I,
-    ) -> Result<Option<Self>, Error> {
-        let buf = {
-            let mut buf = BytesMut::with_capacity(Self::PREFIX_LEN);
-            while io.read_buf(&mut buf).await? != 0 {}
-            buf.freeze()
-        };
-        if buf.len() < Self::PREFIX.len()
-            || &buf.as_ref()[0..Self::PREFIX.len()] != Self::PREFIX
-        {
-            return Ok(None);
+const PREFACE: &'static [u8] = b"proxy.l5d.io/connect\r\n\r\n";
+const BUFFER_CAPACITY: usize = 65_536;
+
+#[async_trait::async_trait]
+impl<I: io::AsyncRead + Unpin + 'static> Detect<I> for DetectConnectionHeader {
+    type Kind = Option<ConnectionHeader>;
+
+    async fn detect(&self, mut io: I) -> Result<(Option<ConnectionHeader>, io::PrefixedIo<I>), Error> {
+        let mut buf = BytesMut::with_capacity(self.capacity);
+
+        loop {
+            match io.read_buf(&mut buf).await? {
+                0 => {},
+                sz if sz < PREFACE.len() => continue,
+                sz => {
+                    if &buf[..PREFACE.len()] == PREFACE {
+                        break;
+                    }
+                }
+            }
+            return Ok((None, io::PrefixedIo::new(buf.freeze(), io)));
         }
 
 
-
-        let sz = buf.get_u32();
-        if sz == 0 {
-            return Ok(None);
-        }
-
-        let buf = {
-            let len = sz.min(io.prefix().len());
-            io.prefix_mut().split_to(len)
-        };
         let needed = sz - buf.len();
         let h = if needed == 0 {
             proto::Header::decode(buf)?
@@ -69,7 +70,9 @@ impl ConnectionHeader {
             port: h.port as u16,
         }))
     }
+}
 
+impl ConnectionHeader {
     pub async fn encode<I: io::AsyncWrite + Unpin>(&self, io: &mut I) -> Result<(), Error> {
         let header = proto::Header {
             port: self.port as i32,
@@ -83,7 +86,7 @@ impl ConnectionHeader {
         let mut buf = {
             let mut buf = BytesMut::new();
             header.encode_length_delimited(&mut buf)?;
-            Bytes::from_static(Self::PREFIX).chain(buf.freeze())
+            Bytes::from_static(PREFACE).chain(buf.freeze())
         };
 
         while buf.remaining() != 0 {

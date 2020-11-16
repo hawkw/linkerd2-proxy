@@ -48,7 +48,7 @@ where
         + Send
         + 'static,
     TSvc::Future: Send,
-    H: svc::NewService<http::Logical, Service = HSvc> + Unpin + Send + Clone + 'static,
+    H: svc::NewService<http::Logical, Service = HSvc> + Unpin + Clone + Send + Sync + 'static,
     HSvc: tower::Service<
             http::Request<http::boxed::Payload>,
             Response = http::Response<http::boxed::Payload>,
@@ -56,7 +56,7 @@ where
         > + Send
         + 'static,
     HSvc::Future: Send,
-    P: profiles::GetProfile<Addr> + Unpin + Clone + Send + 'static,
+    P: profiles::GetProfile<Addr> + Unpin + Clone + Send + Sync + 'static,
     P::Future: Unpin + Send,
     P::Error: Send,
 {
@@ -89,9 +89,6 @@ where
                     .push_spawn_buffer_with_idle_timeout(buffer_capacity, cache_max_idle_age),
             ),
         )
-        .into_make_service()
-        .spawn_buffer(buffer_capacity)
-        .into_new_service()
         .check_new_service::<Target, http::Request<_>>()
         .instrument(|t: &Target| info_span!("target", dst = %t.dst))
         .push(svc::layer::mk(|inner| {
@@ -132,18 +129,21 @@ where
         ))
         .into_inner();
 
-    svc::stack(http::DetectHttp::new(h2_settings, http, tcp, drain))
-        .check_new_service::<tcp::Accept, io::PrefixedIo<transport::metrics::SensorIo<I>>>()
-        .push_on_response(svc::layers().push_spawn_buffer(buffer_capacity).push(
-            transport::Prefix::layer(
-                http::Version::DETECT_BUFFER_CAPACITY,
-                detect_protocol_timeout,
-            ),
+    svc::stack(http::NewServeHttp::new(h2_settings, http, tcp, drain))
+        .check_new_service::<(Option<http::Version>, tcp::Accept), io::PrefixedIo<transport::metrics::SensorIo<I>>>()
+        .cache(svc::layers().push_on_response(
+            svc::layers()
+                .push_failfast(dispatch_timeout)
+                .push_spawn_buffer_with_idle_timeout(buffer_capacity, cache_max_idle_age),
         ))
+        .push(http::DetectHttp::layer(detect_protocol_timeout))
         .check_new_service::<tcp::Accept, transport::metrics::SensorIo<I>>()
         .push(metrics.transport.layer_accept())
         .push_map_target(tcp::Accept::from)
         .check_new_service::<listen::Addrs, I>()
+        // Boxing is necessary purely to limit the link-time overhead of
+        // having enormous types.
+        .box_new()
         .into_inner()
 }
 

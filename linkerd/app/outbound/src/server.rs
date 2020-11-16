@@ -36,13 +36,13 @@ pub fn stack<R, P, C, H, S, I>(
        + 'static
 where
     I: io::AsyncRead + io::AsyncWrite + io::PeerAddr + std::fmt::Debug + Unpin + Send + 'static,
-    R: Resolve<Addr, Endpoint = Metadata, Error = Error> + Unpin + Clone + Send + 'static,
+    R: Resolve<Addr, Endpoint = Metadata, Error = Error> + Unpin + Clone + Send + Sync + 'static,
     R::Future: Unpin + Send,
     R::Resolution: Unpin + Send,
     C: tower::Service<tcp::Endpoint, Error = Error> + Unpin + Clone + Send + Sync + 'static,
     C::Response: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     C::Future: Unpin + Send,
-    H: svc::NewService<http::Logical, Service = S> + Unpin + Send + Clone + 'static,
+    H: svc::NewService<http::Logical, Service = S> + Unpin + Clone + Send + Sync + 'static,
     S: tower::Service<
             http::Request<http::boxed::Payload>,
             Response = http::Response<http::boxed::Payload>,
@@ -50,7 +50,7 @@ where
         > + Send
         + 'static,
     S::Future: Send,
-    P: profiles::GetProfile<SocketAddr> + Unpin + Clone + Send + 'static,
+    P: profiles::GetProfile<SocketAddr> + Unpin + Clone + Send + Sync + 'static,
     P::Future: Unpin + Send,
     P::Error: Send,
 {
@@ -110,19 +110,19 @@ where
     .check_new_service::<tcp::Logical, transport::io::PrefixedIo<transport::metrics::SensorIo<I>>>()
     .into_inner();
 
-    let http = svc::stack(http::DetectHttp::new(
+    let http = svc::stack(http::NewServeHttp::new(
         h2_settings,
         http_server,
         tcp_balance,
         drain.clone(),
     ))
-    .check_new_service::<tcp::Logical, transport::io::PrefixedIo<transport::metrics::SensorIo<I>>>()
-    .push_on_response(svc::layers().push_spawn_buffer(buffer_capacity).push(
-        transport::Prefix::layer(
-            http::Version::DETECT_BUFFER_CAPACITY,
-            detect_protocol_timeout,
-        ),
+    .check_new_service::<(Option<http::Version>, tcp::Logical), transport::io::PrefixedIo<transport::metrics::SensorIo<I>>>()
+    .cache(svc::layers().push_on_response(
+        svc::layers()
+            .push_failfast(dispatch_timeout)
+            .push_spawn_buffer_with_idle_timeout(buffer_capacity, cache_max_idle_age),
     ))
+    .push(http::DetectHttp::layer(detect_protocol_timeout))
     .check_new_service::<tcp::Logical, transport::metrics::SensorIo<I>>()
     .into_inner();
 

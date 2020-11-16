@@ -73,7 +73,8 @@ impl Config {
             Future = impl Send + 'static,
         > + Send
                       + 'static,
-    > + Send
+    > + Clone
+           + Send
            + 'static
     where
         L: svc::NewService<Target, Service = S> + Unpin + Clone + Send + Sync + 'static,
@@ -85,7 +86,7 @@ impl Config {
             + 'static,
         S::Error: Into<Error>,
         S::Future: Unpin + Send,
-        P: profiles::GetProfile<NameAddr> + Unpin + Clone + Send + 'static,
+        P: profiles::GetProfile<NameAddr> + Unpin + Clone + Send + Sync + 'static,
         P::Future: Unpin + Send,
         P::Error: Send,
     {
@@ -173,11 +174,11 @@ impl Config {
         C::Error: Into<Error>,
         C::Response: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
         C::Future: Unpin + Send,
-        P: profiles::GetProfile<NameAddr> + Unpin + Clone + Send + 'static,
+        P: profiles::GetProfile<NameAddr> + Unpin + Clone + Send + Sync + 'static,
         P::Future: Unpin + Send,
         P::Error: Send,
         // The loopback router processes requests sent to the inbound port.
-        L: svc::NewService<Target, Service = S> + Unpin + Send + Clone + 'static,
+        L: svc::NewService<Target, Service = S> + Unpin + Send + Clone + Sync + 'static,
         S: tower::Service<
                 http::Request<http::boxed::Payload>,
                 Response = http::Response<http::boxed::Payload>,
@@ -282,9 +283,9 @@ impl Config {
                         .box_http_response(),
                 ),
             )
-            .into_make_service()
-            .spawn_buffer(buffer_capacity)
-            .into_new_service()
+            // Boxing is necessary purely to limit the link-time overhead of
+            // having enormous types.
+            .box_new()
             .check_new_service::<Target, http::Request<http::boxed::Payload>>()
             .into_inner()
     }
@@ -328,6 +329,7 @@ impl Config {
             dispatch_timeout,
             max_in_flight_requests,
             detect_protocol_timeout,
+            cache_max_idle_age,
             buffer_capacity,
             ..
         } = self.proxy.clone();
@@ -374,7 +376,7 @@ impl Config {
             .check_new_service::<(http::Version, TcpAccept), http::Request<_>>()
             .into_inner();
 
-        svc::stack(http::DetectHttp::new(
+        svc::stack(http::NewServeHttp::new(
             h2_settings,
             http_server,
             svc::stack(tcp_forward)
@@ -382,12 +384,14 @@ impl Config {
                 .into_inner(),
             drain.clone(),
         ))
-        .push_on_response(svc::layers().push_spawn_buffer(buffer_capacity).push(
-            transport::Prefix::layer(
-                http::Version::DETECT_BUFFER_CAPACITY,
-                detect_protocol_timeout,
+        .cache(
+            svc::layers().push_on_response(
+                svc::layers()
+                    .push_failfast(dispatch_timeout)
+                    .push_spawn_buffer_with_idle_timeout(buffer_capacity, cache_max_idle_age),
             ),
-        ))
+        )
+        .push(http::DetectHttp::layer(detect_protocol_timeout))
         .into_inner()
     }
 
@@ -406,7 +410,8 @@ impl Config {
             Future = impl Send + 'static,
         > + Send
                       + 'static,
-    > + Send
+    > + Clone
+           + Send
            + 'static
     where
         D: svc::NewService<TcpAccept, Service = A> + Unpin + Clone + Send + Sync + 'static,
