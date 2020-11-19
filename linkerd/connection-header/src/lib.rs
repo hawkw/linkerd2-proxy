@@ -1,5 +1,7 @@
+#![allow(warnings)]
+
 use bytes::{
-    buf::{Buf, BufExt},
+    buf::{Buf, BufExt, BufMut},
     Bytes, BytesMut,
 };
 use linkerd2_dns::Name;
@@ -25,57 +27,46 @@ pub struct DetectConnectionHeader {
 }
 
 const PREFACE: &'static [u8] = b"proxy.l5d.io/connect\r\n\r\n";
+const PREFACE_LEN: usize = PREFACE.len() + 4;
 const BUFFER_CAPACITY: usize = 65_536;
 
 #[async_trait::async_trait]
-impl<I: io::AsyncRead + Unpin + 'static> Detect<I> for DetectConnectionHeader {
+impl<I: io::AsyncRead + Send + Unpin + 'static> Detect<I> for DetectConnectionHeader {
     type Kind = Option<ConnectionHeader>;
 
     async fn detect(
         &self,
         mut io: I,
     ) -> Result<(Option<ConnectionHeader>, io::PrefixedIo<I>), Error> {
-        let mut buf = BytesMut::with_capacity(self.capacity);
-
-        loop {
-            match io.read_buf(&mut buf).await? {
-                0 => {}
-                sz if sz < PREFACE.len() => continue,
-                sz => {
-                    if &buf[..PREFACE.len()] == PREFACE {
-                        break;
-                    }
-                }
+        match ConnectionHeader::decode(&mut io).await? {
+            Decode::Other(buf) => {
+                return Ok((None, io::PrefixedIo::new(buf, io)));
             }
-            return Ok((None, io::PrefixedIo::new(buf.freeze(), io)));
+            Decode::Header(h) => {
+                return Ok((Some(h), io::PrefixedIo::new(Bytes::new(), io)));
+            }
         }
-
-        let needed = sz - buf.len();
-        let h = if needed == 0 {
-            proto::Header::decode(buf)?
-        } else {
-            let mut rest = BytesMut::with_capacity(needed);
-            while Pin::new(&mut io).read_buf(&mut rest).await? != 0 {}
-            let rest = rest.freeze();
-            let buf = buf.chain(rest);
-            proto::Header::decode(buf)?
-        };
-
-        let name = if h.name.len() == 0 {
-            None
-        } else {
-            Some(Name::try_from(h.name.as_bytes())?)
-        };
-
-        Ok(Some(Self {
-            name,
-            port: h.port as u16,
-        }))
     }
 }
 
+enum Decode {
+    Header(ConnectionHeader),
+    Other(Bytes),
+}
+
 impl ConnectionHeader {
-    pub async fn encode<I: io::AsyncWrite + Unpin>(&self, io: &mut I) -> Result<(), Error> {
+    pub fn encode(&self) -> Bytes {
+        let mut buf = BytesMut::with_capacity(BUFFER_CAPACITY);
+        buf.reserve(PREFACE.len());
+        buf.put(PREFACE);
+
+        buf.reserve(4);
+        // Safety: These bytes must be initialized below once the message has
+        // been encoded.
+        unsafe {
+            buf.advance_mut(4);
+        }
+
         let header = proto::Header {
             port: self.port as i32,
             name: self
@@ -84,50 +75,83 @@ impl ConnectionHeader {
                 .map(|n| n.to_string())
                 .unwrap_or_default(),
         };
+        header.encode(&mut buf);
 
-        let mut buf = {
-            let mut buf = BytesMut::new();
-            header.encode_length_delimited(&mut buf)?;
-            Bytes::from_static(PREFACE).chain(buf.freeze())
-        };
-
-        while buf.remaining() != 0 {
-            io.write_buf(&mut buf).await?;
+        // Once the message length is known, we back-fill the length at the
+        // start of the buffer.
+        let len = buf.len() - PREFACE_LEN;
+        assert!(len <= std::u32::MAX as usize);
+        {
+            let mut buf = &mut buf[PREFACE.len()..PREFACE_LEN];
+            buf.put_u32(len as u32);
         }
 
-        Ok(())
+        buf.freeze()
+    }
+
+    async fn decode<I: io::AsyncRead + Unpin + 'static>(io: &mut I) -> io::Result<Decode> {
+        let mut buf = BytesMut::with_capacity(BUFFER_CAPACITY);
+        buf.resize(PREFACE_LEN, 0x0);
+        let sz = io.read_exact(buf.as_mut()).await?;
+        if sz < PREFACE_LEN || &buf.bytes()[..PREFACE.len()] != PREFACE {
+            println!(
+                "buf={:?}",
+                std::str::from_utf8(&buf.bytes()[..PREFACE.len()])
+            );
+            buf.truncate(sz);
+            return Ok(Decode::Other(buf.freeze()));
+        }
+
+        buf.advance(PREFACE.len());
+        let msg_len = buf.get_u32() as usize;
+        if msg_len > BUFFER_CAPACITY {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Message length exceeds capacity",
+            ));
+        }
+
+        let _ = buf.split();
+        buf.reserve(msg_len);
+        buf.resize(msg_len, 0x0);
+        io.read_exact(buf.as_mut()).await?;
+
+        let h = proto::Header::decode(buf)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid header message"))?;
+
+        let name = if h.name.len() == 0 {
+            None
+        } else {
+            let n = Name::try_from(h.name.as_bytes())
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid name"))?;
+            Some(n)
+        };
+
+        return Ok(Decode::Header(Self {
+            name,
+            port: h.port as u16,
+        }));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use linkerd2_io::Peekable;
 
     #[tokio::test]
     async fn roundtrip() {
-        let mut buf = Vec::<u8>::with_capacity(1024);
-
-        let a = ConnectionHeader {
+        let header = ConnectionHeader {
             port: 4040,
             name: Some(Name::try_from("foo.bar.example.com".as_bytes()).unwrap()),
         };
+        let buf = header.encode();
 
-        a.encode(&mut std::io::Cursor::new(&mut buf))
-            .await
-            .expect("encodes");
-
-        let b = {
-            let mut rx = std::io::Cursor::new(&mut buf)
-                .peek(ConnectionHeader::PREFIX_LEN)
-                .await
-                .expect("decodes");
-            ConnectionHeader::detect(&mut rx)
-                .await
-                .expect("decodes")
-                .expect("decodes")
+        let mut rx = std::io::Cursor::new(buf);
+        let h = match ConnectionHeader::decode(&mut rx).await.expect("decodes") {
+            Decode::Other(_) => panic!("Must decode"),
+            Decode::Header(h) => h,
         };
-        assert_eq!(a.port, b.port);
-        assert_eq!(a.name, b.name);
+        assert_eq!(header.port, h.port);
+        assert_eq!(header.name, h.name);
     }
 }
