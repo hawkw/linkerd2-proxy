@@ -31,12 +31,15 @@ const BUFFER_CAPACITY: usize = 65_536;
 impl<I: io::AsyncRead + Unpin + 'static> Detect<I> for DetectConnectionHeader {
     type Kind = Option<ConnectionHeader>;
 
-    async fn detect(&self, mut io: I) -> Result<(Option<ConnectionHeader>, io::PrefixedIo<I>), Error> {
+    async fn detect(
+        &self,
+        mut io: I,
+    ) -> Result<(Option<ConnectionHeader>, io::PrefixedIo<I>), Error> {
         let mut buf = BytesMut::with_capacity(self.capacity);
 
         loop {
             match io.read_buf(&mut buf).await? {
-                0 => {},
+                0 => {}
                 sz if sz < PREFACE.len() => continue,
                 sz => {
                     if &buf[..PREFACE.len()] == PREFACE {
@@ -46,7 +49,6 @@ impl<I: io::AsyncRead + Unpin + 'static> Detect<I> for DetectConnectionHeader {
             }
             return Ok((None, io::PrefixedIo::new(buf.freeze(), io)));
         }
-
 
         let needed = sz - buf.len();
         let h = if needed == 0 {
