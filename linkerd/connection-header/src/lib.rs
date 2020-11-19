@@ -55,12 +55,14 @@ enum Decode {
 }
 
 impl ConnectionHeader {
+    /// Encodes the connection header to a byte buffer.
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(BUFFER_CAPACITY);
-        buf.reserve(PREFACE.len());
+
+        debug_assert(buf.capacity() > PREFACE.len());
         buf.put(PREFACE);
 
-        buf.reserve(4);
+        debug_assert(buf.capacity() > 4);
         // Safety: These bytes must be initialized below once the message has
         // been encoded.
         unsafe {
@@ -89,21 +91,34 @@ impl ConnectionHeader {
         buf.freeze()
     }
 
+    /// Attempts to decode a connection header from an I/O stream.
+    ///
+    /// If the header is not present, the non-header bytes that were read are
+    /// returned.
+    ///
+    /// An I/O error is returned if the connection header is invalid.
     async fn decode<I: io::AsyncRead + Unpin + 'static>(io: &mut I) -> io::Result<Decode> {
         let mut buf = BytesMut::with_capacity(BUFFER_CAPACITY);
+
+        // Initialize the buffer to be able to hold the PREFACE and message
+        // length.
+        debug_assert!(PREFACE_LEN < BUFFER_CAPACITY);
         buf.resize(PREFACE_LEN, 0x0);
+
+        // Fill the initialized buffer from the stream.
         let sz = io.read_exact(buf.as_mut()).await?;
         if sz < PREFACE_LEN || &buf.bytes()[..PREFACE.len()] != PREFACE {
-            println!(
-                "buf={:?}",
-                std::str::from_utf8(&buf.bytes()[..PREFACE.len()])
-            );
+            // Either the stream ended or it did not match the
             buf.truncate(sz);
             return Ok(Decode::Other(buf.freeze()));
         }
-
+        // Advance the cursor past the preface message;
         buf.advance(PREFACE.len());
+
+        // Read the message length from the stream and advance the cursor.
         let msg_len = buf.get_u32() as usize;
+
+        // Prevent malfeasent clients form forcing us to allocate a huge buffer.
         if msg_len > BUFFER_CAPACITY {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -111,14 +126,22 @@ impl ConnectionHeader {
             ));
         }
 
+        // Drop the preface data from the buffer and initialize enough memory to
+        // hold the header message.
         let _ = buf.split();
         buf.reserve(msg_len);
         buf.resize(msg_len, 0x0);
-        io.read_exact(buf.as_mut()).await?;
+        // Fill the initilalized buffer from the stream.
+        if io.read_exact(buf.as_mut()).await? < msg_len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Full header message not provided",
+            ));
+        }
 
+        // Decode the protobuf message from the buffer.
         let h = proto::Header::decode(buf)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid header message"))?;
-
         let name = if h.name.len() == 0 {
             None
         } else {
@@ -126,7 +149,6 @@ impl ConnectionHeader {
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid name"))?;
             Some(n)
         };
-
         return Ok(Decode::Header(Self {
             name,
             port: h.port as u16,
