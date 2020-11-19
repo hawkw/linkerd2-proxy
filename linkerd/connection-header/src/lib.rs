@@ -192,7 +192,6 @@ mod tests {
             buf.put_slice(b"12345");
             std::io::Cursor::new(buf.freeze())
         };
-
         let mut buf = BytesMut::new();
         let h = Header::read_prefaced(&mut rx, &mut buf)
             .await
@@ -201,5 +200,30 @@ mod tests {
         assert_eq!(header.port, h.port);
         assert_eq!(header.name, h.name);
         assert_eq!(buf.as_ref(), b"12345");
+    }
+
+    #[tokio::test]
+    async fn detect_prefaced() {
+        let header = Header {
+            port: 4040,
+            name: Some(Name::from_str("foo.bar.example.com").unwrap()),
+        };
+        let rx = {
+            let mut buf = BytesMut::new();
+            header.encode_prefaced(&mut buf).expect("must encode");
+            buf.put_slice(b"12345");
+            std::io::Cursor::new(buf.freeze())
+        };
+        let d = DetectHeader {
+            capacity: 100,
+            timeout: time::Duration::from_secs(1),
+        };
+        let (h, io) = match d.detect(rx).await {
+            Ok((Conditional::Some(h), io)) => (h, io),
+            _ => panic!("must decode"),
+        };
+        assert_eq!(header.port, h.port);
+        assert_eq!(header.name, h.name);
+        assert_eq!(io.prefix().as_ref(), b"12345");
     }
 }
