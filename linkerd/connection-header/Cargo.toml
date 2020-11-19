@@ -7,13 +7,14 @@ publish = false
 
 [dependencies]
 async-trait = "0.1"
-futures = "0.3"
 bytes = "0.5"
-linkerd2-dns = { path = "../dns" }
+linkerd2-conditional = { path = "../conditional" }
+linkerd2-dns-name = { path = "../dns/name" }
 linkerd2-error = { path = "../error" }
 linkerd2-io = { path = "../io" }
 linkerd2-proxy-transport = { path = "../proxy/transport" }
 prost = "0.6"
+tokio = { version = "0.2", features = ["time"] }
 
 [build-dependencies]
 prost-build = { version = "0.6", default-features = false }

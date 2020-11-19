@@ -2,50 +2,68 @@ use bytes::{
     buf::{Buf, BufMut},
     BytesMut,
 };
-use linkerd2_dns::Name;
+use linkerd2_conditional::Conditional;
+use linkerd2_dns_name::Name;
 use linkerd2_error::Error;
 use linkerd2_io::{self as io, AsyncReadExt};
 use linkerd2_proxy_transport::Detect;
 use prost::Message;
-use std::convert::TryFrom;
+use std::str::FromStr;
+use tokio::time;
 
 mod proto {
     include!(concat!(env!("OUT_DIR"), "/header.proxy.l5d.io.rs"));
 }
 
 #[derive(Clone, Debug)]
-pub struct ConnectionHeader {
-    pub name: Option<Name>,
+pub struct Header {
+    /// The target port.
     port: u16,
+
+    /// The logical name of the target (service), if one is known.
+    pub name: Option<Name>,
 }
 
 #[derive(Clone, Debug)]
-pub struct DetectConnectionHeader {
+pub struct DetectHeader {
     capacity: usize,
+    timeout: time::Duration,
 }
 
 const PREFACE: &'static [u8] = b"proxy.l5d.io/connect\r\n\r\n";
 const PREFACE_LEN: usize = PREFACE.len() + 4;
 const BUFFER_CAPACITY: usize = 65_536;
 
-#[async_trait::async_trait]
-impl<I: io::AsyncRead + Send + Unpin + 'static> Detect<I> for DetectConnectionHeader {
-    type Kind = Option<ConnectionHeader>;
+#[derive(Copy, Clone, Debug)]
+pub enum Reason {
+    NoPreface,
+    Timeout,
+}
 
-    async fn detect(
-        &self,
-        mut io: I,
-    ) -> Result<(Option<ConnectionHeader>, io::PrefixedIo<I>), Error> {
+pub type ConditionalHeader = Conditional<Header, Reason>;
+
+#[async_trait::async_trait]
+impl<I: io::AsyncRead + Send + Unpin + 'static> Detect<I> for DetectHeader {
+    type Kind = ConditionalHeader;
+
+    async fn detect(&self, mut io: I) -> Result<(ConditionalHeader, io::PrefixedIo<I>), Error> {
         let mut buf = BytesMut::with_capacity(BUFFER_CAPACITY);
-        let header = ConnectionHeader::decode(&mut io, &mut buf).await?;
-        return Ok((header, io::PrefixedIo::new(buf, io)));
+        let read = Header::read_prefaced(&mut io, &mut buf);
+        let header = match time::timeout(self.timeout, read).await {
+            Ok(res) => match res? {
+                Some(h) => Conditional::Some(h),
+                None => Conditional::None(Reason::NoPreface),
+            },
+            Err(_) => Conditional::None(Reason::Timeout),
+        };
+        Ok((header, io::PrefixedIo::new(buf, io)))
     }
 }
 
-impl ConnectionHeader {
+impl Header {
     /// Encodes the connection header to a byte buffer.
     #[inline]
-    pub fn encode(&self, buf: &mut BytesMut) -> Result<(), Error> {
+    pub fn encode_prefaced(&self, buf: &mut BytesMut) -> Result<(), Error> {
         buf.reserve(PREFACE_LEN);
         buf.put(PREFACE);
 
@@ -56,6 +74,21 @@ impl ConnectionHeader {
             buf.advance_mut(4);
         }
 
+        self.encode(buf)?;
+
+        // Once the message length is known, we back-fill the length at the
+        // start of the buffer.
+        let len = buf.len() - PREFACE_LEN;
+        {
+            let mut buf = &mut buf[PREFACE.len()..PREFACE_LEN];
+            assert!(len <= std::u32::MAX as usize);
+            buf.put_u32(len as u32);
+        }
+
+        Ok(())
+    }
+
+    pub fn encode(&self, buf: &mut BytesMut) -> Result<(), Error> {
         let header = proto::Header {
             port: self.port as i32,
             name: self
@@ -65,16 +98,6 @@ impl ConnectionHeader {
                 .unwrap_or_default(),
         };
         header.encode(buf)?;
-
-        // Once the message length is known, we back-fill the length at the
-        // start of the buffer.
-        let len = buf.len() - PREFACE_LEN;
-        assert!(len <= std::u32::MAX as usize);
-        {
-            let mut buf = &mut buf[PREFACE.len()..PREFACE_LEN];
-            buf.put_u32(len as u32);
-        }
-
         Ok(())
     }
 
@@ -85,7 +108,7 @@ impl ConnectionHeader {
     ///
     /// An I/O error is returned if the connection header is invalid.
     #[inline]
-    async fn decode<I: io::AsyncRead + Unpin + 'static>(
+    async fn read_prefaced<I: io::AsyncRead + Unpin + 'static>(
         io: &mut I,
         buf: &mut BytesMut,
     ) -> io::Result<Option<Self>> {
@@ -106,7 +129,7 @@ impl ConnectionHeader {
         // Read the message length. If it is larger than our allowed buffer
         // capacity, fail the connection.
         let msg_len = buf.get_u32() as usize;
-        if msg_len > BUFFER_CAPACITY {
+        if msg_len > buf.capacity() + PREFACE_LEN {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Message length exceeds capacity",
@@ -128,25 +151,25 @@ impl ConnectionHeader {
         // Take the bytes needed to parse the message and leave the remaining
         // bytes in the caller-provided buffer.
         let msg = buf.split_to(msg_len);
+        Self::decode(msg.freeze())
+    }
 
-        // Decode the protobuf message from the buffer.
-        let header = {
-            let h = proto::Header::decode(msg).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "Invalid header message")
-            })?;
+    // Decodes a protobuf message from the buffer.
+    fn decode<B: Buf>(buf: B) -> io::Result<Option<Self>> {
+        let h = proto::Header::decode(buf)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid header message"))?;
 
-            let name = if h.name.len() == 0 {
-                None
-            } else {
-                let n = Name::try_from(h.name.as_bytes())
-                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid name"))?;
-                Some(n)
-            };
+        let name = if h.name.len() == 0 {
+            None
+        } else {
+            let n = Name::from_str(&h.name)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid name"))?;
+            Some(n)
+        };
 
-            Self {
-                name,
-                port: h.port as u16,
-            }
+        let header = Self {
+            name,
+            port: h.port as u16,
         };
 
         Ok(Some(header))
@@ -158,20 +181,20 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn roundtrip() {
-        let header = ConnectionHeader {
+    async fn roundtrip_prefaced() {
+        let header = Header {
             port: 4040,
-            name: Some(Name::try_from("foo.bar.example.com".as_bytes()).unwrap()),
+            name: Some(Name::from_str("foo.bar.example.com").unwrap()),
         };
         let mut rx = {
             let mut buf = BytesMut::new();
-            header.encode(&mut buf).expect("must encode");
+            header.encode_prefaced(&mut buf).expect("must encode");
             buf.put_slice(b"12345");
             std::io::Cursor::new(buf.freeze())
         };
 
         let mut buf = BytesMut::new();
-        let h = ConnectionHeader::decode(&mut rx, &mut buf)
+        let h = Header::read_prefaced(&mut rx, &mut buf)
             .await
             .expect("decodes")
             .expect("decodes");

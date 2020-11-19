@@ -1007,8 +1007,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes 0.5.4",
- "futures 0.3.5",
- "linkerd2-dns",
+ "linkerd2-conditional",
+ "linkerd2-dns-name",
  "linkerd2-error",
  "linkerd2-io",
  "linkerd2-proxy-transport",
