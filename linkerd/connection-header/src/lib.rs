@@ -125,7 +125,6 @@ impl Header {
             return Ok(None);
         }
         buf.advance(PREFACE.len());
-        println!("len={:?}", buf.as_ref());
 
         // Read the message length. If it is larger than our allowed buffer
         // capacity, fail the connection.
