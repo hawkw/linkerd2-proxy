@@ -67,7 +67,7 @@ impl Header {
         buf.reserve(PREFACE_LEN);
         buf.put(PREFACE);
 
-        debug_assert!(buf.capacity() > 4);
+        debug_assert!(buf.capacity() >= 4);
         // Safety: These bytes must be initialized below once the message has
         // been encoded.
         unsafe {
@@ -79,15 +79,16 @@ impl Header {
         // Once the message length is known, we back-fill the length at the
         // start of the buffer.
         let len = buf.len() - PREFACE_LEN;
+        assert!(len <= std::u32::MAX as usize);
         {
             let mut buf = &mut buf[PREFACE.len()..PREFACE_LEN];
-            assert!(len <= std::u32::MAX as usize);
             buf.put_u32(len as u32);
         }
 
         Ok(())
     }
 
+    #[inline]
     pub fn encode(&self, buf: &mut BytesMut) -> Result<(), Error> {
         let header = proto::Header {
             port: self.port as i32,
@@ -155,6 +156,7 @@ impl Header {
     }
 
     // Decodes a protobuf message from the buffer.
+    #[inline]
     fn decode<B: Buf>(buf: B) -> io::Result<Option<Self>> {
         let h = proto::Header::decode(buf)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid header message"))?;
