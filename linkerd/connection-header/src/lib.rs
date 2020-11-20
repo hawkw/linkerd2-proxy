@@ -125,6 +125,7 @@ impl Header {
             return Ok(None);
         }
         buf.advance(PREFACE.len());
+        println!("len={:?}", buf.as_ref());
 
         // Read the message length. If it is larger than our allowed buffer
         // capacity, fail the connection.
@@ -167,12 +168,10 @@ impl Header {
             Some(n)
         };
 
-        let header = Self {
+        Ok(Some(Self {
             name,
             port: h.port as u16,
-        };
-
-        Ok(Some(header))
+        }))
     }
 }
 
@@ -225,5 +224,75 @@ mod tests {
         assert_eq!(header.port, h.port);
         assert_eq!(header.name, h.name);
         assert_eq!(io.prefix().as_ref(), b"12345");
+    }
+
+    #[tokio::test]
+    async fn detect_timeout() {
+        let (rx, _tx) = tokio_test::io::Builder::new().build_with_handle();
+        let d = DetectHeader {
+            capacity: 100,
+            timeout: time::Duration::from_millis(100),
+        };
+        let io = match d.detect(rx).await {
+            Ok((Conditional::None(Reason::Timeout), io)) => io,
+            _ => panic!("must timeout"),
+        };
+        assert!(io.prefix().is_empty());
+    }
+
+    #[tokio::test]
+    async fn detect_no_header() {
+        const MSG: &'static [u8] = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let (rx, _tx) = tokio_test::io::Builder::new().read(MSG).build_with_handle();
+        let d = DetectHeader {
+            capacity: 100,
+            timeout: time::Duration::from_secs(1),
+        };
+        let io = match d.detect(rx).await {
+            Ok((Conditional::None(Reason::NoPreface), io)) => io,
+            _ => panic!("must timeout"),
+        };
+        assert_eq!(io.prefix(), MSG);
+    }
+
+    #[tokio::test]
+    async fn many_reads() {
+        let header = Header {
+            port: 4040,
+            name: Some(Name::from_str("foo.bar.example.com").unwrap()),
+        };
+        let mut rx = {
+            let msg = {
+                let mut buf = BytesMut::new();
+                header.encode(&mut buf).expect("must encode");
+                buf.freeze()
+            };
+            let len = {
+                let mut buf = BytesMut::with_capacity(4);
+                buf.put_u32(msg.len() as u32);
+                buf.freeze()
+            };
+            tokio_test::io::Builder::new()
+                .read(b"proxy.l5d")
+                .read(b".io/connect")
+                .read(b"\r\n\r\n")
+                .read(len.as_ref())
+                .read(msg.as_ref())
+                .read(b"12345")
+                .build()
+        };
+        let mut buf = BytesMut::new();
+        let h = Header::read_prefaced(&mut rx, &mut buf)
+            .await
+            .expect("I/O must not error")
+            .expect("header must be present");
+        assert_eq!(header.port, h.port);
+        assert_eq!(header.name, h.name);
+
+        let mut buf = [0u8; 5];
+        rx.read_exact(&mut buf)
+            .await
+            .expect("I/O must still have data");
+        assert_eq!(&buf, b"12345");
     }
 }
