@@ -24,6 +24,7 @@ jobs:
             strip: arm-linux-musleabihf-strip
     name: Package (${{ matrix.architecture }})
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - name: git co
         uses: actions/checkout@v1

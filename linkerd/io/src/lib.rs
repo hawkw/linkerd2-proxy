@@ -9,7 +9,7 @@ pub use self::{
     prefixed::PrefixedIo,
     sensor::{Sensor, SensorIo},
 };
-pub use std::io::{Error, Read, Result, Write};
+pub use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::net::SocketAddr;
 pub use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -44,6 +44,12 @@ impl PeerAddr for tokio_test::io::Mock {
     }
 }
 
+#[cfg(feature = "tokio-test")]
+impl PeerAddr for tokio::io::DuplexStream {
+    fn peer_addr(&self) -> SocketAddr {
+        ([0, 0, 0, 0], 0).into()
+    }
+}
 mod internal {
     use super::{AsyncRead, AsyncWrite, PeerAddr, Poll};
     use bytes::{Buf, BufMut};

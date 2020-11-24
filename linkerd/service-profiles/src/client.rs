@@ -6,12 +6,14 @@ use linkerd2_addr::Addr;
 use linkerd2_dns_name::Name;
 use linkerd2_error::{Error, Recover};
 use linkerd2_proxy_api::destination as api;
+use linkerd2_proxy_api_resolve::pb as resolve;
 use pin_project::pin_project;
 use regex::Regex;
 use std::{
-    convert::{TryFrom, TryInto},
+    convert::TryInto,
     future::Future,
     pin::Pin,
+    str::FromStr,
     sync::Arc,
     task::{Context, Poll},
     time::Duration,
@@ -229,7 +231,7 @@ where
         let profile = ready!(rx.poll_next(cx)).map(|res| {
             res.map(|proto| {
                 debug!("profile received: {:?}", proto);
-                let name = Name::try_from(proto.fully_qualified_name.as_bytes()).ok();
+                let name = Name::from_str(&proto.fully_qualified_name).ok();
                 let retry_budget = proto.retry_budget.and_then(convert_retry_budget);
                 let http_routes = proto
                     .routes
@@ -241,11 +243,16 @@ where
                     .into_iter()
                     .filter_map(convert_dst_override)
                     .collect();
+                let endpoint = proto.endpoint.and_then(|e| {
+                    let labels = std::collections::HashMap::new();
+                    resolve::to_addr_meta(e, &labels)
+                });
                 Profile {
                     name,
                     http_routes,
                     targets,
                     opaque_protocol: proto.opaque_protocol,
+                    endpoint,
                 }
             })
         });

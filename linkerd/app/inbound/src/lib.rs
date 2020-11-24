@@ -73,7 +73,8 @@ impl Config {
             Future = impl Send + 'static,
         > + Send
                       + 'static,
-    > + Send
+    > + Clone
+           + Send
            + 'static
     where
         L: svc::NewService<Target, Service = S> + Unpin + Clone + Send + Sync + 'static,
@@ -85,7 +86,7 @@ impl Config {
             + 'static,
         S::Error: Into<Error>,
         S::Future: Unpin + Send,
-        P: profiles::GetProfile<NameAddr> + Unpin + Clone + Send + 'static,
+        P: profiles::GetProfile<NameAddr> + Unpin + Clone + Send + Sync + 'static,
         P::Future: Unpin + Send,
         P::Error: Send,
     {
@@ -173,11 +174,11 @@ impl Config {
         C::Error: Into<Error>,
         C::Response: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
         C::Future: Unpin + Send,
-        P: profiles::GetProfile<NameAddr> + Unpin + Clone + Send + 'static,
+        P: profiles::GetProfile<NameAddr> + Unpin + Clone + Send + Sync + 'static,
         P::Future: Unpin + Send,
         P::Error: Send,
         // The loopback router processes requests sent to the inbound port.
-        L: svc::NewService<Target, Service = S> + Unpin + Send + Clone + 'static,
+        L: svc::NewService<Target, Service = S> + Unpin + Send + Clone + Sync + 'static,
         S: tower::Service<
                 http::Request<http::boxed::Payload>,
                 Response = http::Response<http::boxed::Payload>,
@@ -209,7 +210,7 @@ impl Config {
                 connect.h2_settings,
             ))
             .push(reconnect::layer({
-                let backoff = connect.backoff.clone();
+                let backoff = connect.backoff;
                 move |_| Ok(backoff.stream())
             }))
             .check_new_service::<HttpEndpoint, http::Request<_>>();
@@ -267,7 +268,7 @@ impl Config {
 
         // If the traffic is targeted at the inbound port, send it through
         // the loopback service (i.e. as a gateway).
-        let switch_loopback = svc::stack::MakeSwitch::new(prevent_loop, loopback, profile);
+        let switch_loopback = svc::stack(loopback).push_switch(prevent_loop, profile);
 
         // Attempts to resolve the target as a service profile or, if that
         // fails, skips that stack to forward to the local endpoint.
@@ -282,9 +283,9 @@ impl Config {
                         .box_http_response(),
                 ),
             )
-            .into_make_service()
-            .spawn_buffer(buffer_capacity)
-            .into_new_service()
+            // Boxing is necessary purely to limit the link-time overhead of
+            // having enormous types.
+            .box_new_service()
             .check_new_service::<Target, http::Request<http::boxed::Payload>>()
             .into_inner()
     }
@@ -406,7 +407,8 @@ impl Config {
             Future = impl Send + 'static,
         > + Send
                       + 'static,
-    > + Send
+    > + Clone
+           + Send
            + 'static
     where
         D: svc::NewService<TcpAccept, Service = A> + Unpin + Clone + Send + Sync + 'static,
@@ -423,25 +425,24 @@ impl Config {
             ..
         } = self.proxy;
         let require_identity = self.require_identity_for_inbound_ports;
-        let skip_detect = self.disable_protocol_detection_for_ports;
 
-        svc::stack::MakeSwitch::new(
-            skip_detect,
-            svc::stack(detect)
-                .push_request_filter(require_identity)
-                .push(metrics.transport.layer_accept())
-                .push_map_target(TcpAccept::from)
-                .push(tls::DetectTls::layer(
-                    identity.clone(),
-                    detect_protocol_timeout,
-                ))
-                .into_inner(),
-            svc::stack(tcp_forward)
-                .push_map_target(TcpEndpoint::from)
-                .push(metrics.transport.layer_accept())
-                .push_map_target(TcpAccept::from)
-                .into_inner(),
-        )
+        svc::stack(detect)
+            .push_request_filter(require_identity)
+            .push(metrics.transport.layer_accept())
+            .push_map_target(TcpAccept::from)
+            .push(tls::DetectTls::layer(
+                identity.clone(),
+                detect_protocol_timeout,
+            ))
+            .push_switch(
+                self.disable_protocol_detection_for_ports,
+                svc::stack(tcp_forward)
+                    .push_map_target(TcpEndpoint::from)
+                    .push(metrics.transport.layer_accept())
+                    .push_map_target(TcpAccept::from)
+                    .into_inner(),
+            )
+            .into_inner()
     }
 }
 

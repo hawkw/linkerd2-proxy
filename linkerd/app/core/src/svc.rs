@@ -262,6 +262,16 @@ impl<S> Stack<S> {
         }))
     }
 
+    pub fn push_switch<T: Clone, U: Clone>(
+        self,
+        switch: T,
+        other: U,
+    ) -> Stack<stack::MakeSwitch<T, S, U>> {
+        self.push(layer::mk(|inner: S| {
+            stack::MakeSwitch::new(switch.clone(), inner, other.clone())
+        }))
+    }
+
     // pub fn box_http_request<B>(self) -> Stack<http::boxed::BoxRequest<S, B>>
     // where
     //     B: hyper::body::HttpBody<Data = http::boxed::Data, Error = Error> + 'static,
@@ -272,6 +282,14 @@ impl<S> Stack<S> {
 
     pub fn box_http_response(self) -> Stack<http::boxed::BoxResponse<S>> {
         self.push(http::boxed::response::Layer::new())
+    }
+
+    pub fn box_new_service<T>(self) -> Stack<stack::BoxNewService<T, S::Service>>
+    where
+        S: NewService<T> + Clone + Send + Sync + 'static,
+        S::Service: Send + 'static,
+    {
+        self.push(layer::mk(stack::BoxNewService::new))
     }
 
     /// Validates that this stack serves T-typed targets.
