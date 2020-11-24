@@ -28,7 +28,7 @@ pub type Profiles<T> = Resolver<T, Option<profiles::Receiver>>;
 #[derive(Debug, Clone)]
 pub struct DstSender<T>(mpsc::UnboundedSender<Result<Update<T>, Error>>);
 
-pub struct ProfileSender(watch::Sender<Profile>);
+pub type ProfileSender = watch::Sender<Profile>;
 
 #[derive(Debug, Clone)]
 pub struct Handle<T, E>(Arc<State<T, E>>);
@@ -81,14 +81,14 @@ impl<T, E> Dst<T, E>
 where
     T: Hash + Eq,
 {
-    pub fn endpoint_tx(&self, endpoint: T) -> DstSender<E> {
+    pub fn endpoint_tx(&self, t: impl Into<T>) -> DstSender<E> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.state.endpoints.lock().unwrap().insert(endpoint, rx);
+        self.state.endpoints.lock().unwrap().insert(t.into(), rx);
         DstSender(tx)
     }
 
-    pub fn endpoint_exists(self, endpoint: T, addr: SocketAddr, meta: E) -> Self {
-        let mut tx = self.endpoint_tx(endpoint);
+    pub fn endpoint_exists(self, t: impl Into<T>, addr: SocketAddr, meta: E) -> Self {
+        let mut tx = self.endpoint_tx(t);
         tx.add(vec![(addr, meta)]).unwrap();
         self
     }
@@ -144,7 +144,7 @@ where
     pub fn profile_tx(&self, addr: T) -> ProfileSender {
         let (tx, rx) = watch::channel(Profile::default());
         self.state.endpoints.lock().unwrap().insert(addr, Some(rx));
-        ProfileSender(tx)
+        tx
     }
 
     pub fn profile(self, addr: T, profile: Profile) -> Self {

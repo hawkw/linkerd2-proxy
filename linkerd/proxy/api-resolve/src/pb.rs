@@ -6,10 +6,10 @@ use crate::identity;
 use crate::metadata::{Metadata, ProtocolHint};
 use http::uri::Authority;
 use indexmap::IndexMap;
-use std::{collections::HashMap, net::SocketAddr};
+use std::{collections::HashMap, net::SocketAddr, str::FromStr};
 
 /// Construct a new labeled `SocketAddr `from a protobuf `WeightedAddr`.
-pub(in crate) fn to_addr_meta(
+pub fn to_addr_meta(
     pb: WeightedAddr,
     set_labels: &HashMap<String, String>,
 ) -> Option<(SocketAddr, Metadata)> {
@@ -51,7 +51,7 @@ fn to_id(pb: TlsIdentity) -> Option<identity::Name> {
     use crate::api::destination::tls_identity::Strategy;
 
     let Strategy::DnsLikeIdentity(i) = pb.strategy?;
-    match identity::Name::from_hostname(i.name.as_bytes()) {
+    match identity::Name::from_str(&i.name) {
         Ok(i) => Some(i),
         Err(_) => {
             tracing::warn!("Ignoring invalid identity: {}", i.name);
