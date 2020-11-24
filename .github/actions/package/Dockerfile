@@ -8,10 +8,9 @@ RUN apt-get update && \
     rustup target add aarch64-unknown-linux-${GLIBC} && \
     rustup target add armv7-unknown-linux-${GLIBC}eabihf && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/
-ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-ENV CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc
-ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX__MUSL_LINKER=aarch64-linux-musl-gcc
-ENV CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=arm-linux-musleabihf-gcc
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_${GLIBC}_RUSTFLAGS="-Clink-self-contained=yes -Clinker=rust-lld"
+ENV CARGO_TARGET_ARMV7_UNKNOWN_LINUX_${GLIBC}_RUSTFLAGS="-Clink-self-contained=yes -Clinker=rust-lld"
+
 # v2.1.0
 ARG CHECKSEC_SHA=04582bad41589ad479ca8b1f0170ed317475b5a5
 RUN cd /usr/local/bin && curl -vsLO "https://raw.githubusercontent.com/slimm609/checksec.sh/$CHECKSEC_SHA/checksec" && chmod 755 checksec
