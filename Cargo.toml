@@ -63,3 +63,6 @@ debug = false
 [patch.crates-io]
 webpki = { git = "https://github.com/linkerd/webpki", branch = "cert-dns-names-0.21" }
 tower = { version = "0.3", git = "https://github.com/tower-rs/tower", rev = "ad348d8" }
+# TODO(eliza): can be unpatched when ring
+# 7bac7256793ff90154c3ab0fe230e9c866d0a2c3 is published (presumably in v0.16.18)
+ring = { git = "https://github.com/briansmith/ring", rev = "034bfe71437c3844ac2fefee46d5c76e2cc2a045"}

@@ -2,8 +2,10 @@ name: Release
 
 on:
   push:
-    tags:
-      - "release/*"
+    branches:
+      - eliza/distroless
+    #tags:
+    #  - "release/*"
 
 jobs:
   package:
@@ -12,14 +14,14 @@ jobs:
         architecture: [amd64, arm64, arm]
         include:
           - architecture: amd64
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             strip: strip
           - architecture: arm64
-            target: aarch64-unknown-linux-gnu
-            strip: aarch64-linux-gnu-strip
+            target: aarch64-unknown-linux-musl
+            strip: aarch64-linux-musl-strip
           - architecture: arm
-            target: armv7-unknown-linux-gnueabihf
-            strip: arm-linux-gnueabihf-strip
+            target: armv7-unknown-linux-musleabihf
+            strip: arm-linux-musleabihf-strip
     name: Package (${{ matrix.architecture }})
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -58,33 +60,32 @@ jobs:
           name: ${{ matrix.architecture }}-artifacts
           path: target/${{ matrix.target }}/release/package/*
 
-  release:
-    needs: [package]
-    name: GitHub Release
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: git co
-        uses: actions/checkout@v1
+  # release:
+  #   needs: [package]
+  #   name: GitHub Release
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: git co
+  #       uses: actions/checkout@v1
 
-      - name: meta
-        id: release-tag-meta
-        uses: ./.github/actions/release-tag-meta
-        with:
-          git-ref: ${{ github.ref }}
+  #     - name: meta
+  #       id: release-tag-meta
+  #       uses: ./.github/actions/release-tag-meta
+  #       with:
+  #         git-ref: ${{ github.ref }}
 
-      - name: download artifacts
-        uses: actions/download-artifact@v2
-        with:
-          path: artifacts
+  #     - name: download artifacts
+  #       uses: actions/download-artifact@v2
+  #       with:
+  #         path: artifacts
 
-      - name: display structure of downloaded files
-        run: ls -R artifacts
+  #     - name: display structure of downloaded files
+  #       run: ls -R artifacts
 
-      - name: release
-        uses: softprops/action-gh-release@b21b43d
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          name: ${{ steps.release-tag-meta.outputs.name }}
-          files: artifacts/**/*
+  #     - name: release
+  #       uses: softprops/action-gh-release@b21b43d
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #       with:
+  #         name: ${{ steps.release-tag-meta.outputs.name }}
+  #         files: artifacts/**/*
